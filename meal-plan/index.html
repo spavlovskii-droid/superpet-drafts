@@ -874,6 +874,9 @@ input[type=range]{width:100%;accent-color:var(--accent);height:28px;}
     var allergies = activeAllergies();
     var gramsPerDay = (calc && calc.gramsPerDay) || 0;
 
+    function isSafe(key){
+      return !(FLAVOR_ALLERGENS[key]||[]).some(function(a){ return allergies.indexOf(a)>=0; });
+    }
     function compFor(useHypo){
       return useHypo
         ? HYPO_COMPOSITION
@@ -881,11 +884,16 @@ input[type=range]{width:100%;accent-color:var(--accent);height:28px;}
             wild: ASSORTI_COMPOSITION[species].wild.map(function(k){ return {key:k, qty:1}; }) };
     }
     function priceFor(key, fmt){ return fmt==='easy' ? EASY_PRICE[key] : WILD_PRICE[species][key]; }
+    // Собирает набор ТОЛЬКО из безопасных вкусов (аллергенные слоты исключаются
+    // целиком, а не просто помечаются) — если после фильтра ничего не остаётся,
+    // возвращает null, и вызывающий код пробует следующую композицию/фолбэк.
     function buildItems(comp){
-      var slots = [];
+      var allSlots = [];
       ['easy','wild'].forEach(function(fmt){
-        comp[fmt].forEach(function(entry){ slots.push({key:entry.key, format:fmt, baseQty:entry.qty}); });
+        comp[fmt].forEach(function(entry){ allSlots.push({key:entry.key, format:fmt, baseQty:entry.qty}); });
       });
+      var slots = allSlots.filter(function(sl){ return isSafe(sl.key); });
+      if(slots.length===0) return null;
       var baseTotal = slots.reduce(function(s,sl){ return s+sl.baseQty; }, 0);
       var scaledTarget = Math.round((gramsPerDay*STARTER_TRIAL_DAYS)/100/5)*5;
       var totalTarget = Math.max(baseTotal, scaledTarget);
@@ -897,26 +905,26 @@ input[type=range]{width:100%;accent-color:var(--accent);height:28px;}
         return {key:sl.key, label:FLAVOR_LABEL[sl.key], format:sl.format, qty:qty, price:price*qty, unitPrice:price};
       });
     }
-    function hasBlocked(items){
-      return items.some(function(it){ return (FLAVOR_ALLERGENS[it.key]||[]).some(function(a){ return allergies.indexOf(a)>=0; }); });
-    }
 
     var kind = allergies.length>0 ? 'hypo' : 'assorti';
-    var items = buildItems(compFor(kind==='hypo'));
-    var blocked = hasBlocked(items);
-    if(kind==='hypo' && blocked){
+    var items = kind==='hypo' ? buildItems(compFor(true)) : null;
+    if(kind==='hypo' && !items){
       kind = 'assorti';
-      items = buildItems(compFor(false));
-      blocked = hasBlocked(items);
     }
+    if(!items){
+      items = buildItems(compFor(false));
+      kind = allergies.length>0 ? 'assorti' : kind;
+    }
+    var blocked = !items;
+    items = items || [];
 
     var totalPrice = items.reduce(function(s,it){ return s+it.price; }, 0);
     var totalPouches = items.reduce(function(s,it){ return s+it.qty; }, 0);
     var totalWeight = totalPouches*100;
     // Сколько дней реально хватит этого объёма (не всегда ровно STARTER_TRIAL_DAYS —
     // минимум «по паучу каждого вкуса» может растянуться дольше или закончиться раньше).
-    var daysCovered = gramsPerDay>0 ? Math.max(1, Math.round(totalWeight/gramsPerDay)) : STARTER_TRIAL_DAYS;
-    var pricePerDay = Math.round(totalPrice/daysCovered);
+    var daysCovered = (gramsPerDay>0 && totalWeight>0) ? Math.max(1, Math.round(totalWeight/gramsPerDay)) : STARTER_TRIAL_DAYS;
+    var pricePerDay = totalPouches>0 ? Math.round(totalPrice/daysCovered) : 0;
     return {kind:kind, blocked:blocked, items:items, totalPouches:totalPouches, totalWeight:totalWeight, totalPrice:totalPrice, days:STARTER_TRIAL_DAYS, daysCovered:daysCovered, pricePerDay:pricePerDay};
   }
 
@@ -1042,11 +1050,17 @@ input[type=range]{width:100%;accent-color:var(--accent);height:28px;}
     $('#resPerServing').textContent = calc.gramsPerServing + ' г';
 
     var starter = buildStarterKit(calc);
-    $('#teaserBadge').textContent = starter.kind==='hypo' ? 'Гипоаллергенный' : 'Супер-ассорти';
-    $('#teaserSub').textContent = starter.totalPouches+' пауча по 100 г · '+starter.totalWeight+' г · '+starter.totalPrice+' ₽ · хватит на '+starter.daysCovered+' дн. · '+starter.pricePerDay+' ₽/день';
-    $('#teaserFlavors').innerHTML = starter.items.map(function(it){
-      return flavorRowHtml(it, it.format, it.qty, it.price);
-    }).join('');
+    if(starter.blocked){
+      $('#teaserBadge').textContent = 'Индивидуальный подбор';
+      $('#teaserSub').textContent = 'С таким набором аллергий нет безопасного готового набора';
+      $('#teaserFlavors').innerHTML = '<div class="plan-warn">С таким набором аллергий нет безопасного стартового набора в каталоге — подберём состав индивидуально и напишем на email.</div>';
+    } else {
+      $('#teaserBadge').textContent = starter.kind==='hypo' ? 'Гипоаллергенный' : 'Супер-ассорти';
+      $('#teaserSub').textContent = starter.totalPouches+' пауча по 100 г · '+starter.totalWeight+' г · '+starter.totalPrice+' ₽ · хватит на '+starter.daysCovered+' дн. · '+starter.pricePerDay+' ₽/день';
+      $('#teaserFlavors').innerHTML = starter.items.map(function(it){
+        return flavorRowHtml(it, it.format, it.qty, it.price);
+      }).join('');
+    }
 
     var pouchesPerDay = calc.gramsPerDay/100;
     var pouches14d = Math.max(5, Math.round((calc.gramsPerDay*14)/100/5)*5);
@@ -1076,7 +1090,7 @@ input[type=range]{width:100%;accent-color:var(--accent);height:28px;}
     var starter = buildStarterKit(calc);
     var species = state.species || 'dog';
     var img = $('#starterPhoto');
-    img.src = ASSET_DATA['starter/'+species+'-'+starter.kind+'.jpg'] || '';
+    img.src = ASSET_DATA['starter/'+species+'-'+(starter.blocked ? 'assorti' : starter.kind)+'.jpg'] || '';
   }
 
   function choosePlan(kind){
@@ -1091,14 +1105,23 @@ input[type=range]{width:100%;accent-color:var(--accent);height:28px;}
     if(state.chosenPlan==='starter'){
       formatRow.hidden = true;
       var starter = buildStarterKit(calc);
-      $('#miniCartTitle').textContent = 'Стартовый набор — '+(starter.kind==='hypo' ? 'гипоаллергенный' : 'супер-ассорти');
-      $('#miniCartLead').textContent = 'Пробный набор на '+starter.days+' дня по вашей рассчитанной норме, чтобы бережно перевести питомца на новое питание.';
-      $('#miniCartSub').textContent = starter.totalPouches+' пауча по 100 г · '+starter.totalWeight+' г · хватит на '+starter.daysCovered+' дн.';
-      $('#miniCartFlavors').innerHTML = starter.items.map(function(it){
-        return flavorRowHtml(it, it.format, it.qty, it.price);
-      }).join('');
-      $('#miniCartTotal').textContent = starter.totalPrice+' ₽';
-      $('#miniCartPerDay').textContent = '≈'+starter.pricePerDay+' ₽/день';
+      if(starter.blocked){
+        $('#miniCartTitle').textContent = 'Стартовый набор — индивидуальный подбор';
+        $('#miniCartLead').textContent = 'С таким набором аллергий нет безопасного готового набора в каталоге — подберём состав индивидуально и напишем на email.';
+        $('#miniCartSub').textContent = '—';
+        $('#miniCartFlavors').innerHTML = '<div class="plan-warn">С таким набором аллергий нет безопасного стартового набора в каталоге — подберём состав индивидуально и напишем на email.</div>';
+        $('#miniCartTotal').textContent = '—';
+        $('#miniCartPerDay').textContent = '';
+      } else {
+        $('#miniCartTitle').textContent = 'Стартовый набор — '+(starter.kind==='hypo' ? 'гипоаллергенный' : 'супер-ассорти');
+        $('#miniCartLead').textContent = 'Пробный набор на '+starter.days+' дня по вашей рассчитанной норме, чтобы бережно перевести питомца на новое питание.';
+        $('#miniCartSub').textContent = starter.totalPouches+' пауча по 100 г · '+starter.totalWeight+' г · хватит на '+starter.daysCovered+' дн.';
+        $('#miniCartFlavors').innerHTML = starter.items.map(function(it){
+          return flavorRowHtml(it, it.format, it.qty, it.price);
+        }).join('');
+        $('#miniCartTotal').textContent = starter.totalPrice+' ₽';
+        $('#miniCartPerDay').textContent = '≈'+starter.pricePerDay+' ₽/день';
+      }
     } else {
       formatRow.hidden = false;
       $all('[data-field="planFormat"]').forEach(function(b){
@@ -1184,6 +1207,9 @@ input[type=range]{width:100%;accent-color:var(--accent);height:28px;}
     $all('[data-bind]').forEach(function(el){ el.textContent = resolveBind(el.dataset.bind); });
   }
 
+  function validEmail(v){ return /^\S+@\S+\.\S+$/.test((v||'').trim()); }
+  function validPhone(v){ return (v||'').replace(/\D/g,'').length>=10; }
+
   function canContinue(){
     var id = STEPS[idx];
     switch(id){
@@ -1198,9 +1224,9 @@ input[type=range]{width:100%;accent-color:var(--accent);height:28px;}
       case 'allergies': return state.allergies.length>0;
       case 'health': return !!state.health;
       case 'treats': return !!state.treats;
-      case 'contact': return state.ownerName.trim().length>0 && /\S+@\S+\.\S+/.test(state.email);
+      case 'contact': return state.ownerName.trim().length>0 && validEmail(state.email);
       case 'calculating': return false;
-      case 'orderForm': return !orderSubmitted && state.ownerName.trim().length>0 && /\S+@\S+\.\S+/.test(state.email) && state.phone.trim().length>=6;
+      case 'orderForm': return !orderSubmitted && state.ownerName.trim().length>0 && validEmail(state.email) && validPhone(state.phone);
       default: return true;
     }
   }
